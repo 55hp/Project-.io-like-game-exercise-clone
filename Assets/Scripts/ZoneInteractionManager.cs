@@ -56,7 +56,7 @@ public class ZoneInteractionManager : MonoBehaviour
     /// If mover's position touches an enemy's active trail:
     ///   1. The trail OWNER (enemy) is killed.
     ///   2. The enemy's zone area is absorbed into the mover's zone.
-    /// The mover itself is never killed by touching another's trail.
+    /// Only enemies in Trailing state can be killed via trail collision.
     /// </summary>
     public void CheckTrailKill(Character mover)
     {
@@ -70,12 +70,12 @@ public class ZoneInteractionManager : MonoBehaviour
         {
             if (enemy == mover) continue;
             if (enemy == null) continue;
+            if (enemy.State != CharacterState.Trailing) continue;
 
             List<Vector3> enemyTrail = enemy.GetTrailPoints();
 
             if (enemyTrail == null || enemyTrail.Count < 2) continue;
 
-            // Check if mover's position is close to any segment of the enemy trail
             for (int i = 0; i < enemyTrail.Count - 1; i++)
             {
                 Vector2 a = new Vector2(enemyTrail[i].x, enemyTrail[i].z);
@@ -83,16 +83,18 @@ public class ZoneInteractionManager : MonoBehaviour
 
                 float dist = DistancePointToSegment(moverPos, a, b);
 
-                // Soglia = mezzo-spessore trail nemica + mezzo-spessore del mover body.
                 float enemyHalf = enemy.trail != null ? enemy.trail.startWidth * 0.5f : 0.25f;
                 float moverHalf = mover.trail != null ? mover.trail.startWidth * 0.5f : 0.25f;
                 float killThreshold = enemyHalf + moverHalf;
 
                 if (dist < killThreshold)
                 {
-                    // Regola: il proprietario della trail (enemy) muore.
-                    // La sua area viene assorbita dal mover.
-                    AbsorbAreaAndKill(mover, enemy);
+                    // Compute exact kill point on the segment.
+                    Vector2 killPoint2D = ClosestPointOnSegment(moverPos, a, b);
+                    Vector3 killPoint = new Vector3(killPoint2D.x, 0f, killPoint2D.y);
+
+                    enemy.SetState(CharacterState.Dead);
+                    AbsorbAreaAndKill(mover, enemy, i, killPoint);
                     return;
                 }
             }
@@ -157,7 +159,8 @@ public class ZoneInteractionManager : MonoBehaviour
             // If the enemy zone is entirely consumed → full absorb and kill.
             if (surviving.Count < 3)
             {
-                AbsorbAreaAndKill(attacker, enemy);
+                enemy.SetState(CharacterState.Dead);
+                AbsorbAreaAndKill(attacker, enemy, -1, Vector3.zero);
                 continue;
             }
 
@@ -178,11 +181,13 @@ public class ZoneInteractionManager : MonoBehaviour
 
     /// <summary>
     /// Rebuilds the absorber's zone as the geometric UNION of:
-    ///   A's area, A's trail (thickened), B's trail (thickened), B's area.
-    /// Uses Clipper2Lib (PathsD / ClipperD) for a clean boolean union.
+    ///   A's area, A's trail (thickened), B's trail trimmed at kill point (thickened), B's area.
+    /// The victim's trail is cut at the kill segment — only the portion from zone edge
+    /// up to and including the kill point is used. The "dead tail" beyond is discarded.
+    /// Uses Clipper2Lib for a clean boolean union.
     /// Rolls back to A's previous area if triangulation fails.
     /// </summary>
-    private void AbsorbAreaAndKill(Character absorber, Character victim)
+    private void AbsorbAreaAndKill(Character absorber, Character victim, int killSegmentIndex, Vector3 killPoint)
     {
         List<Vector3> backup = absorber.areaVertices;
 
@@ -190,8 +195,9 @@ public class ZoneInteractionManager : MonoBehaviour
         PathsD subjects = new PathsD();
 
         // 1. A's area polygon.
-        if (absorber.areaVertices != null && absorber.areaVertices.Count >= 3)
-            subjects.Add(Vector3ListToPathD(absorber.areaVertices));
+        List<Vector3> absorberArea = absorber.GetAreaPolygon();
+        if (absorberArea != null && absorberArea.Count >= 3)
+            subjects.Add(Vector3ListToPathD(absorberArea));
 
         // 2. A's trail thickened into a corridor.
         List<Vector3> absorberTrail = absorber.GetTrailPoints();
@@ -199,15 +205,17 @@ public class ZoneInteractionManager : MonoBehaviour
         if (absorberCorridor != null)
             subjects.AddRange(absorberCorridor);
 
-        // 3. B's trail thickened into a corridor.
-        List<Vector3> victimTrail = victim.GetTrailPoints();
-        PathsD victimCorridor = ThickenTrail(victimTrail, victim.trail);
+        // 3. B's trail TRIMMED at kill point, then thickened.
+        List<Vector3> victimTrailFull = victim.GetTrailPoints();
+        List<Vector3> victimTrailTrimmed = TrimTrailAtKillPoint(victimTrailFull, killSegmentIndex, killPoint);
+        PathsD victimCorridor = ThickenTrail(victimTrailTrimmed, victim.trail);
         if (victimCorridor != null)
             subjects.AddRange(victimCorridor);
 
         // 4. B's area polygon.
-        if (victim.areaVertices != null && victim.areaVertices.Count >= 3)
-            subjects.Add(Vector3ListToPathD(victim.areaVertices));
+        List<Vector3> victimArea = victim.GetAreaPolygon();
+        if (victimArea != null && victimArea.Count >= 3)
+            subjects.Add(Vector3ListToPathD(victimArea));
 
         // --- Execute Clipper Union ---
         PathsD solution = Clipper.Union(subjects, FillRule.NonZero);
@@ -219,7 +227,7 @@ public class ZoneInteractionManager : MonoBehaviour
             return;
         }
 
-        // Pick the largest contour by absolute area.
+        // Pick the largest resulting contour by absolute area.
         PathD largest = solution[0];
         double largestArea = Math.Abs(Clipper.Area(largest));
 
@@ -251,6 +259,34 @@ public class ZoneInteractionManager : MonoBehaviour
 
         // Destroy victim.
         CleanUpVictim(victim);
+    }
+
+    /// <summary>
+    /// Trims the victim trail: keeps points from index 0 up to and including killSegmentIndex,
+    /// then appends the exact killPoint. Everything after is discarded.
+    /// If killSegmentIndex is negative, returns the full trail untrimmed (zone conquest case).
+    /// </summary>
+    private List<Vector3> TrimTrailAtKillPoint(List<Vector3> fullTrail, int killSegmentIndex, Vector3 killPoint)
+    {
+        if (fullTrail == null || fullTrail.Count < 2)
+            return fullTrail ?? new List<Vector3>();
+
+        // No trimming requested — use the entire trail.
+        if (killSegmentIndex < 0)
+            return fullTrail;
+
+        // Clamp index to valid range.
+        int lastIndex = Mathf.Min(killSegmentIndex, fullTrail.Count - 2);
+
+        // Keep all points from the start up to the start of the kill segment (inclusive).
+        List<Vector3> trimmed = new List<Vector3>(lastIndex + 2);
+        for (int i = 0; i <= lastIndex; i++)
+            trimmed.Add(fullTrail[i]);
+
+        // Append the kill point as the terminal point of the trimmed trail.
+        trimmed.Add(killPoint);
+
+        return trimmed;
     }
 
     private void CleanUpVictim(Character victim)
@@ -299,6 +335,13 @@ public class ZoneInteractionManager : MonoBehaviour
         for (int i = 0; i < path.Count; i++)
             result.Add(new Vector3((float)path[i].x, 0f, (float)path[i].y));
         return result;
+    }
+
+    private static Vector2 ClosestPointOnSegment(Vector2 p, Vector2 a, Vector2 b)
+    {
+        Vector2 ab = b - a;
+        float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / ab.sqrMagnitude);
+        return a + t * ab;
     }
 
     private float DistancePointToSegment(Vector2 p, Vector2 a, Vector2 b)
