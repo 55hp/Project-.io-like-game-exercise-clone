@@ -16,8 +16,8 @@ public class WaypointMover : MonoBehaviour
 
     [Header("Zone Painting")]
     public bool paintZone = true;
-    [SerializeField] private float footprintRadius  = 0.4f;   // metà della larghezza XZ del mesh
-    [SerializeField] [Range(0f, 1f)] private float outsideThreshold = 0.95f;
+    [Tooltip("La trail si attiva quando il personaggio è entro questa distanza dal confine della zona (in unità mondo).")]
+    [SerializeField] private float trailStartMargin = 0.15f;
 
     [Header("Playback")]
     [SerializeField] private bool autoStart = true;
@@ -55,6 +55,7 @@ public class WaypointMover : MonoBehaviour
     {
         transform.position = waypoints[0].position;
         character.InitializeZone();
+        ZoneInteractionManager.Instance?.RegisterCharacter(character);
         previousPosition = transform.position;
         if (autoStart) StartMoving();
     }
@@ -107,17 +108,16 @@ public class WaypointMover : MonoBehaviour
         // --- Zone painting – valutato ogni frame dopo l'aggiornamento posizione --
         if (paintZone)
         {
-            if (character.IsLargelyOutsideZone(transform.position, footprintRadius, outsideThreshold))
+            if (character.IsNearOrOutsideZone(transform.position, trailStartMargin))
             {
-                // 95%+ del footprint è fuori dalla zona → traccia la trail
+                // Il centro ha attraversato il confine → trail inizia immediatamente, zero gap visivo.
                 character.AddTrailPoint(transform.position);
+                ZoneInteractionManager.Instance?.CheckTrailKill(character);
             }
             else if (character.IsDrawingTrail && character.IsInsideZone(transform.position))
             {
-                // Il centro del Character è chiaramente dentro la zona con trail attiva → chiudi l'area.
-                // Usare IsInsideZone (singolo punto) invece di !IsLargelyOutsideZone aggiunge isteresi:
-                // la trail inizia con 95%+ fuori, si chiude solo quando il centro è dentro.
-                // Questo evita l'oscillazione rapida al bordo che corrompeva il poligono.
+                // Il centro è rientrato nella zona con trail attiva → chiudi l'area.
+                ZoneInteractionManager.Instance?.CheckZoneConquest(character, character.TrailVertices);
                 character.ReturnToZone();
             }
         }
@@ -170,7 +170,10 @@ public class WaypointMover : MonoBehaviour
         if (loop)
         {
             if (paintZone && character.IsDrawingTrail)
+            {
+                ZoneInteractionManager.Instance?.CheckZoneConquest(character, character.TrailVertices);
                 character.ReturnToZone();
+            }
 
             currentIndex = 0;
             progress     = 0f;
@@ -183,7 +186,10 @@ public class WaypointMover : MonoBehaviour
             StopMoving();
 
             if (paintZone)
+            {
+                ZoneInteractionManager.Instance?.CheckZoneConquest(character, character.TrailVertices);
                 character.ReturnToZone();
+            }
         }
     }
 

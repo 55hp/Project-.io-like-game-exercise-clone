@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
+public enum CharacterState { InZone, Trailing, Dead }
+
 [DisallowMultipleComponent]
 public class Character : MonoBehaviour
 {
@@ -20,6 +22,11 @@ public class Character : MonoBehaviour
     // Public data – only this class can reassign the list reference.
     public List<Vector3> areaVertices { get; private set; }
 
+    // State machine.
+    public CharacterState State { get; private set; } = CharacterState.InZone;
+
+    public void SetState(CharacterState newState) { State = newState; }
+
     // Zone child object refs.
     private GameObject   zoneGO;
     private MeshFilter   zoneFilter;
@@ -30,7 +37,7 @@ public class Character : MonoBehaviour
     [SerializeField] private int minTrailPointsForDeformation = 5;
 
     [Header("Trail")]
-    [SerializeField] private float minPointDistance = 0.1f;
+    private const float MIN_POINT_DISTANCE = 0.05f;
     private List<Vector3> newAreaVertices = new List<Vector3>();
     public TrailRenderer trail;
 
@@ -152,6 +159,12 @@ public class Character : MonoBehaviour
     /// <summary>True while the player has accumulated at least one trail point outside the zone.</summary>
     public bool IsDrawingTrail => newAreaVertices != null && newAreaVertices.Count > 1;
 
+    /// <summary>
+    /// Read-only access to the current trail points for external systems (e.g. ZoneInteractionManager).
+    /// The list is cleared by ReturnToZone(); never hold a reference across frames.
+    /// </summary>
+    public List<Vector3> TrailVertices => newAreaVertices;
+
     /// <summary>Returns true when worldPos is inside the current zone polygon.</summary>
     public bool IsInsideZone(Vector3 worldPos)
     {
@@ -160,46 +173,233 @@ public class Character : MonoBehaviour
     }
 
     /// <summary>
-    /// Returns true when at least <paramref name="threshold"/> fraction of the player's
-    /// footprint sample points (5×5 grid within the square of side 2*radius) are outside
-    /// the zone. Use this instead of IsInsideZone for overlap-based trail activation.
+    /// Returns true when worldPos is outside the zone OR within <paramref name="margin"/>
+    /// world-units of its boundary. Use this to start the trail slightly before the
+    /// character visually crosses the edge.
     /// </summary>
-    public bool IsLargelyOutsideZone(Vector3 worldPos, float radius, float threshold = 0.95f)
+    public bool IsNearOrOutsideZone(Vector3 worldPos, float margin)
     {
         if (areaVertices == null || areaVertices.Count < 3) return true;
 
-        Vector2[] polygon  = Vertices2D(areaVertices);
-        const int steps    = 4;                        // (steps+1)² = 25 sample points
-        float     stepSize = (radius * 2f) / steps;
-        int       outside  = 0;
-        int       total    = 0;
+        Vector2 p = new Vector2(worldPos.x, worldPos.z);
+        Vector2[] poly = Vertices2D(areaVertices);
 
-        for (int xi = 0; xi <= steps; xi++)
+        if (!AreaManager.IsPointInPolygon(p, poly)) return true;
+
+        // Inside zone: check distance to nearest boundary segment.
+        for (int i = 0; i < areaVertices.Count; i++)
         {
-            for (int zi = 0; zi <= steps; zi++)
-            {
-                float x = worldPos.x - radius + xi * stepSize;
-                float z = worldPos.z - radius + zi * stepSize;
-                total++;
-                if (!AreaManager.IsPointInPolygon(new Vector2(x, z), polygon))
-                    outside++;
-            }
+            Vector2 a = poly[i];
+            Vector2 b = poly[(i + 1) % poly.Length];
+            if (DistancePointToSegment2D(p, a, b) < margin) return true;
         }
 
-        return total > 0 && (float)outside / total >= threshold;
+        return false;
+    }
+
+    private static float DistancePointToSegment2D(Vector2 p, Vector2 a, Vector2 b)
+    {
+        Vector2 ab = b - a;
+        Vector2 ap = p - a;
+        float t = Mathf.Clamp01(Vector2.Dot(ap, ab) / ab.sqrMagnitude);
+        return Vector2.Distance(p, a + t * ab);
+    }
+
+    /// <summary>
+    /// Offsets each point of <paramref name="trail"/> outward (away from the zone centroid)
+    /// by <paramref name="offset"/> units, perpendicular to the local trail tangent on the XZ plane.
+    /// Used to make the captured area include the full visual width of the TrailRenderer.
+    /// </summary>
+    private List<Vector3> OffsetTrailOutward(List<Vector3> trail, float offset)
+    {
+        if (trail.Count < 2) return trail;
+
+        // Zone centroid as "inside" reference.
+        Vector3 centroid = Vector3.zero;
+        foreach (Vector3 v in areaVertices) centroid += v;
+        centroid /= areaVertices.Count;
+
+        List<Vector3> result = new List<Vector3>(trail.Count);
+
+        for (int i = 0; i < trail.Count; i++)
+        {
+            // Non offsettare il primo e l'ultimo punto: devono rimanere ancorati
+            // al confine della zona per DeformArea.FindClosestIndex.
+            if (i == 0 || i == trail.Count - 1)
+            {
+                result.Add(trail[i]);
+                continue;
+            }
+
+            // Tangent: central difference for interior points.
+            Vector3 tangent = trail[i + 1] - trail[i - 1];
+            tangent.y = 0f;
+            if (tangent.sqrMagnitude < 0.0001f)
+            {
+                result.Add(trail[i]);
+                continue;
+            }
+            tangent.Normalize();
+
+            // One of the two XZ perpendiculars.
+            Vector3 perp = new Vector3(-tangent.z, 0f, tangent.x);
+
+            // Flip if it points toward the centroid instead of away from it.
+            Vector3 toCentroid = centroid - trail[i];
+            toCentroid.y = 0f;
+            if (Vector3.Dot(perp, toCentroid) > 0f) perp = -perp;
+
+            result.Add(trail[i] + perp * offset);
+        }
+
+        return result;
+    }
+
+    public List<Vector3> GetTrailPoints()
+    {
+        return new List<Vector3>(newAreaVertices);
+    }
+
+    /// <summary>Returns a copy of the current area polygon vertices.</summary>
+    public List<Vector3> GetAreaPolygon()
+    {
+        return new List<Vector3>(areaVertices);
+    }
+
+    /// <summary>
+    /// Returns the active trail thickened into a closed corridor polygon using the
+    /// TrailRenderer startWidth. Returns an empty list if the trail has fewer than 2 points.
+    /// </summary>
+    public List<Vector3> GetTrailPolygon()
+    {
+        if (newAreaVertices.Count < 2)
+            return new List<Vector3>();
+
+        float halfWidth = trail != null ? trail.startWidth * 0.5f : 0.25f;
+        Vector2[] corridor = BuildCorridorPolygon(newAreaVertices, halfWidth);
+
+        if (corridor == null || corridor.Length == 0)
+            return new List<Vector3>();
+
+        List<Vector3> result = new List<Vector3>(corridor.Length);
+        for (int i = 0; i < corridor.Length; i++)
+            result.Add(new Vector3(corridor[i].x, 0f, corridor[i].y));
+        return result;
+    }
+
+    /// <summary>Returns true if there is a real active trail (at least 2 points).</summary>
+    public bool HasActiveTrail()
+    {
+        return newAreaVertices.Count >= 2;
+    }
+
+    /// <summary>
+    /// Static version for external use: builds a corridor polygon from any center line.
+    /// </summary>
+    public static Vector2[] BuildCorridorPolygon(List<Vector3> centerLine, float halfWidth)
+    {
+        int n = centerLine.Count;
+        if (n < 2 || halfWidth <= 0f) return null;
+
+        Vector2[] left  = new Vector2[n];
+        Vector2[] right = new Vector2[n];
+
+        for (int i = 0; i < n; i++)
+        {
+            Vector2 tangent;
+            Vector2 pi = new Vector2(centerLine[i].x, centerLine[i].z);
+
+            if      (i == 0)     tangent = new Vector2(centerLine[1].x, centerLine[1].z) - pi;
+            else if (i == n - 1) tangent = pi - new Vector2(centerLine[n - 2].x, centerLine[n - 2].z);
+            else                 tangent = new Vector2(centerLine[i + 1].x, centerLine[i + 1].z)
+                                         - new Vector2(centerLine[i - 1].x, centerLine[i - 1].z);
+
+            if (tangent.sqrMagnitude < 0.0001f) tangent = Vector2.right;
+            tangent.Normalize();
+
+            // Perpendicolare (rotate 90° CCW).
+            Vector2 perp = new Vector2(-tangent.y, tangent.x);
+
+            left[i]  = pi + perp * halfWidth;
+            right[i] = pi - perp * halfWidth;
+        }
+
+        // Poligono chiuso: lato sinistro in avanti + lato destro in retromarcia.
+        Vector2[] polygon = new Vector2[n * 2];
+        for (int i = 0; i < n; i++) polygon[i]     = left[i];
+        for (int i = 0; i < n; i++) polygon[n + i] = right[n - 1 - i];
+
+        return polygon;
+    }
+
+    /// <summary>Replaces areaVertices with the supplied list. Called by ZoneInteractionManager on conquest.</summary>
+    public void SetAreaVertices(List<Vector3> verts)
+    {
+        areaVertices = verts;
+    }
+
+    /// <summary>Destroys the zone GameObject immediately. Called before the character is killed.</summary>
+    public void DestroyZone()
+    {
+        if (zoneGO != null)
+        {
+#if UNITY_EDITOR
+            DestroyImmediate(zoneGO);
+#else
+            Destroy(zoneGO);
+#endif
+            zoneGO = null;
+        }
+    }
+
+    /// <summary>
+    /// Clears the active trail (newAreaVertices) and resets the TrailRenderer.
+    /// Called after an immediate zone rebuild so the trail restarts fresh.
+    /// </summary>
+    public void ResetTrail()
+    {
+        newAreaVertices.Clear();
+
+        if (trail != null)
+        {
+            trail.Clear();
+            trail.emitting = false;
+            trail.time = 0.5f;
+        }
     }
 
     public void AddTrailPoint(Vector3 worldPos)
     {
         bool tooClose = newAreaVertices.Count > 0 &&
-                        Vector3.Distance(worldPos, newAreaVertices[newAreaVertices.Count - 1]) <= minPointDistance;
+                        Vector3.Distance(worldPos, newAreaVertices[newAreaVertices.Count - 1]) <= MIN_POINT_DISTANCE;
         if (tooClose) return;
+
+        // Distanza minima al boundary calcolata sui SEGMENTI (non sui vertici).
+        float minDistToBoundary = float.MaxValue;
+        Vector2 p2D = new Vector2(worldPos.x, worldPos.z);
+        for (int i = 0; i < areaVertices.Count; i++)
+        {
+            Vector2 a = new Vector2(areaVertices[i].x, areaVertices[i].z);
+            Vector2 b = new Vector2(areaVertices[(i + 1) % areaVertices.Count].x,
+                                    areaVertices[(i + 1) % areaVertices.Count].z);
+            float d = DistancePointToSegment2D(p2D, a, b);
+            if (d < minDistToBoundary) minDistToBoundary = d;
+        }
+
+        bool insideZone = AreaManager.IsPointInPolygon(p2D, Vertices2D(areaVertices));
+
+        // Accetta il punto se è fuori zona, oppure se è dentro ma vicino al confine.
+        // La soglia tiene conto del mezzo-spessore della trail per non tagliare punti utili.
+        float boundaryTolerance = trail != null ? trail.startWidth * 0.5f + 0.1f : 0.3f;
+        if (insideZone && minDistToBoundary > boundaryTolerance) return;
 
         newAreaVertices.Add(worldPos);
 
+        State = CharacterState.Trailing;
+
         if (trail != null)
         {
-            trail.time    = Mathf.Infinity;
+            trail.time     = Mathf.Infinity;
             trail.emitting = true;
         }
     }
@@ -208,7 +408,11 @@ public class Character : MonoBehaviour
     {
         if (newAreaVertices.Count >= minTrailPointsForDeformation)
         {
-            List<Vector3> candidate = AreaManager.DeformArea(areaVertices, newAreaVertices);
+            List<Vector3> trailForDeform = newAreaVertices;
+            if (trail != null && trail.startWidth > 0f)
+                trailForDeform = OffsetTrailOutward(newAreaVertices, trail.startWidth * 0.5f);
+
+            List<Vector3> candidate = AreaManager.DeformArea(areaVertices, trailForDeform);
 
             // Atomic commit: only accept the new polygon if it triangulates successfully.
             // This prevents areaVertices from diverging from the visible mesh when the
@@ -236,6 +440,8 @@ public class Character : MonoBehaviour
             trail.emitting = false;
             trail.time     = 0.5f;
         }
+
+        State = CharacterState.InZone;
     }
 
     // -------------------------------------------------------------------------
