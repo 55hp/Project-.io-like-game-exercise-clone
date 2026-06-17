@@ -12,6 +12,16 @@ public class ZoneInteractionManager : MonoBehaviour
     public static ZoneInteractionManager Instance { get; private set; }
 
     // -------------------------------------------------------------------------
+    // Reveal settings
+    // -------------------------------------------------------------------------
+
+    [Header("Participants (assign manually)")]
+    [Tooltip("The player character.")]
+    [SerializeField] private Character player;
+    [Tooltip("Only the ENEMIES that are active in this scene. Leave disabled NPCs out.")]
+    [SerializeField] private List<Character> enemies = new List<Character>();
+
+    // -------------------------------------------------------------------------
     // Fields
     // -------------------------------------------------------------------------
 
@@ -31,17 +41,35 @@ public class ZoneInteractionManager : MonoBehaviour
 
         Instance = this;
 
-        allCharacters = new List<Character>(FindObjectsOfType<Character>());
+        // Deterministic population: only the manually assigned participants.
+        // No FindObjectsOfType, so execution order no longer affects the list.
+        allCharacters = new List<Character>();
+
+        if (player != null && !allCharacters.Contains(player))
+            allCharacters.Add(player);
+
+        if (enemies != null)
+        {
+            foreach (Character e in enemies)
+            {
+                if (e != null && !allCharacters.Contains(e))
+                    allCharacters.Add(e);
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
-    /// <summary>Adds c to allCharacters if not already present.</summary>
+    /// <summary>
+    /// Optional safety add. The list is normally populated from the manually
+    /// assigned player + enemies fields in Awake; this only adds c if missing,
+    /// so a stray call (e.g. from WaypointMover.Start) can never create duplicates.
+    /// </summary>
     public void RegisterCharacter(Character c)
     {
-        if (!allCharacters.Contains(c))
+        if (c != null && !allCharacters.Contains(c))
             allCharacters.Add(c);
     }
 
@@ -159,8 +187,12 @@ public class ZoneInteractionManager : MonoBehaviour
             // If the enemy zone is entirely consumed → full absorb and kill.
             if (surviving.Count < 3)
             {
+                // Reveal centre for an enclosure kill: the centroid of the victim area,
+                // since there is no single collision point. killSegmentIndex = -1 means
+                // "use the full victim trail" inside AbsorbAreaAndKill.
                 enemy.SetState(CharacterState.Dead);
-                AbsorbAreaAndKill(attacker, enemy, -1, Vector3.zero);
+                Vector3 enclosureCentre = CentroidXZ(enemy.GetAreaPolygon());
+                AbsorbAreaAndKill(attacker, enemy, -1, enclosureCentre);
                 continue;
             }
 
@@ -176,116 +208,175 @@ public class ZoneInteractionManager : MonoBehaviour
     }
 
     // -------------------------------------------------------------------------
-    // Private helpers
+    // Absorb & kill
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Rebuilds the absorber's zone as the geometric UNION of:
-    ///   A's area, A's trail (thickened), B's trail trimmed at kill point (thickened), B's area.
-    /// The victim's trail is cut at the kill segment — only the portion from zone edge
-    /// up to and including the kill point is used. The "dead tail" beyond is discarded.
-    /// Uses Clipper2Lib for a clean boolean union.
-    /// Rolls back to A's previous area if triangulation fails.
+    /// Single deterministic path for both trail-kill and full-enclosure conquest.
+    ///
+    /// Two areas are computed:
+    ///   - FULL logical area  = attacker area + attacker trail + victim trimmed trail + victim area.
+    ///     Assigned to areaVertices so the collider / IsInsideZone include the conquered land
+    ///     immediately and the character never re-draws trail over it.
+    ///   - RENDER area (during the reveal) = the same union WITHOUT the victim area, so the main
+    ///     zone mesh grows only up to the kill point and does NOT yet show the conquered region.
+    ///
+    /// The conquered region (victim area) is then revealed by a SEPARATE temporary mesh that
+    /// animates its own _RevealRadius from 0 outward over ~1s. Because that mesh contains only the
+    /// conquered region, the radius it needs is small and the sweep is clearly visible. On complete,
+    /// the main mesh is committed to the full logical area and the temporary mesh is destroyed.
+    /// No single-radius limitation, no coplanar double-draw.
     /// </summary>
-    private void AbsorbAreaAndKill(Character absorber, Character victim, int killSegmentIndex, Vector3 killPoint)
+    private void AbsorbAreaAndKill(Character absorber, Character victim, int killSegmentIndex, Vector3 revealCentre)
     {
-        List<Vector3> backup = absorber.areaVertices;
+        // --- Capture everything we need BEFORE mutating/destroying ---
+        List<Vector3> preConquestArea   = absorber.GetAreaPolygon();
+        List<Vector3> absorberTrailRaw  = new List<Vector3>(absorber.GetTrailPoints());
+        List<Vector3> victimAreaPolygon = victim.GetAreaPolygon();
+        Material      zoneMat           = absorber.GetZoneMaterial();
 
-        // --- Build the four subject polygons ---
-        PathsD subjects = new PathsD();
+        // --- Shared subjects: attacker area + attacker corridor + victim TRIMMED corridor ---
+        // These three define the attacker's reach UP TO the kill point (no conquered region yet).
+        PathsD baseSubjects = new PathsD();
 
-        // 1. A's area polygon.
-        List<Vector3> absorberArea = absorber.GetAreaPolygon();
-        if (absorberArea != null && absorberArea.Count >= 3)
-            subjects.Add(Vector3ListToPathD(absorberArea));
+        if (preConquestArea != null && preConquestArea.Count >= 3)
+            baseSubjects.Add(Vector3ListToPathD(preConquestArea));
 
-        // 2. A's trail thickened into a corridor.
-        List<Vector3> absorberTrail = absorber.GetTrailPoints();
-        PathsD absorberCorridor = ThickenTrail(absorberTrail, absorber.trail);
+        PathsD absorberCorridor = ThickenTrail(absorberTrailRaw, absorber.trail);
         if (absorberCorridor != null)
-            subjects.AddRange(absorberCorridor);
+            baseSubjects.AddRange(absorberCorridor);
 
-        // 3. B's trail TRIMMED at kill point, then thickened.
-        List<Vector3> victimTrailFull = victim.GetTrailPoints();
-        List<Vector3> victimTrailTrimmed = TrimTrailAtKillPoint(victimTrailFull, killSegmentIndex, killPoint);
+        List<Vector3> victimTrailFull    = victim.GetTrailPoints();
+        List<Vector3> victimTrailTrimmed = TrimTrailAtKillPoint(victimTrailFull, killSegmentIndex, revealCentre);
         PathsD victimCorridor = ThickenTrail(victimTrailTrimmed, victim.trail);
         if (victimCorridor != null)
-            subjects.AddRange(victimCorridor);
+            baseSubjects.AddRange(victimCorridor);
 
-        // 4. B's area polygon.
-        List<Vector3> victimArea = victim.GetAreaPolygon();
-        if (victimArea != null && victimArea.Count >= 3)
-            subjects.Add(Vector3ListToPathD(victimArea));
+        // RENDER area = union of base subjects only (no victim area).
+        List<Vector3> renderArea = UnionToPolygon(baseSubjects);
 
-        // --- Execute Clipper Union ---
-        PathsD solution = Clipper.Union(subjects, FillRule.NonZero);
+        // FULL area = base subjects + victim area.
+        PathsD fullSubjects = new PathsD(baseSubjects);
+        if (victimAreaPolygon != null && victimAreaPolygon.Count >= 3)
+            fullSubjects.Add(Vector3ListToPathD(victimAreaPolygon));
+        List<Vector3> fullArea = UnionToPolygon(fullSubjects);
 
-        if (solution == null || solution.Count == 0)
+        // --- Apply: logical area = full, rendered mesh = render area (conquered region hidden) ---
+        List<Vector3> backup = absorber.areaVertices;
+        bool applied = false;
+
+        if (fullArea != null && fullArea.Count >= 3)
         {
-            Debug.LogWarning("[ZoneInteractionManager] Clipper Union returned empty result, rolled back.", absorber);
-            CleanUpVictim(victim);
-            return;
+            absorber.SetAreaVertices(fullArea);                 // logical (collision) = full
+            List<Vector3> meshNow = (renderArea != null && renderArea.Count >= 3) ? renderArea : fullArea;
+            if (absorber.UpdateRenderedArea(meshNow))           // mesh = render area (no conquered region)
+                applied = true;
+            else
+            {
+                absorber.SetAreaVertices(backup);
+                absorber.UpdateArea();
+                Debug.LogWarning("[ZoneInteractionManager] Absorb render mesh failed, rolled back.", absorber);
+            }
+        }
+        else
+        {
+            Debug.LogWarning("[ZoneInteractionManager] Absorb full union empty, skipping.", absorber);
         }
 
-        // Pick the largest resulting contour by absolute area.
-        PathD largest = solution[0];
+        // Clear A's trail so it restarts fresh from here.
+        absorber.ResetTrail();
+
+        // Destroy the victim and its old zone visual immediately.
+        CleanUpVictim(victim);
+
+        // --- Reveal: animate the conquered region on a SEPARATE temporary mesh from radius 0 ---
+        if (applied && victimAreaPolygon != null && victimAreaPolygon.Count >= 3 && zoneMat != null)
+        {
+            ConquestRevealAnimator animator = FindOrCreateRevealAnimator();
+            animator.PlayReveal(
+                absorber,
+                victimAreaPolygon,
+                revealCentre,
+                zoneMat,
+                onComplete: () =>
+                {
+                    if (absorber != null)
+                        absorber.CommitRenderedArea(); // main mesh now shows the full logical area
+                });
+        }
+        else if (applied && absorber != null)
+        {
+            // No reveal possible — just commit the full area to the visible mesh.
+            absorber.CommitRenderedArea();
+        }
+    }
+
+    /// <summary>Unions the given subjects and returns the largest contour as a Vector3 polygon, or null.</summary>
+    private List<Vector3> UnionToPolygon(PathsD subjects)
+    {
+        if (subjects == null || subjects.Count == 0) return null;
+
+        PathsD solution = Clipper.Union(subjects, FillRule.NonZero);
+        if (solution == null || solution.Count == 0) return null;
+
+        return PathDToVector3List(PickLargestContour(solution));
+    }
+
+    /// <summary>Finds or creates the single ConquestRevealAnimator used to play reveal animations.</summary>
+    private ConquestRevealAnimator FindOrCreateRevealAnimator()
+    {
+        ConquestRevealAnimator animator = FindObjectOfType<ConquestRevealAnimator>();
+        if (animator == null)
+        {
+            GameObject go = new GameObject("ConquestRevealAnimator");
+            animator = go.AddComponent<ConquestRevealAnimator>();
+        }
+        return animator;
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>Returns the contour with the largest absolute area from a PathsD result.</summary>
+    private static PathD PickLargestContour(PathsD paths)
+    {
+        PathD largest = paths[0];
         double largestArea = Math.Abs(Clipper.Area(largest));
 
-        for (int i = 1; i < solution.Count; i++)
+        for (int i = 1; i < paths.Count; i++)
         {
-            double a = Math.Abs(Clipper.Area(solution[i]));
+            double a = Math.Abs(Clipper.Area(paths[i]));
             if (a > largestArea)
             {
                 largestArea = a;
-                largest = solution[i];
+                largest = paths[i];
             }
         }
 
-        // Convert back to List<Vector3>.
-        List<Vector3> newArea = PathDToVector3List(largest);
-
-        // Assign and try to rebuild mesh.
-        absorber.SetAreaVertices(newArea);
-
-        if (!absorber.UpdateArea())
-        {
-            absorber.SetAreaVertices(backup);
-            absorber.UpdateArea();
-            Debug.LogWarning("[ZoneInteractionManager] AbsorbAreaAndKill triangulation failed after union, rolled back.", absorber);
-        }
-
-        // Clear A's trail.
-        absorber.ResetTrail();
-
-        // Destroy victim.
-        CleanUpVictim(victim);
+        return largest;
     }
 
     /// <summary>
     /// Trims the victim trail: keeps points from index 0 up to and including killSegmentIndex,
-    /// then appends the exact killPoint. Everything after is discarded.
-    /// If killSegmentIndex is negative, returns the full trail untrimmed (zone conquest case).
+    /// then appends the exact kill point. Everything after is discarded.
+    /// If killSegmentIndex is negative, returns the full trail untrimmed (enclosure case).
     /// </summary>
     private List<Vector3> TrimTrailAtKillPoint(List<Vector3> fullTrail, int killSegmentIndex, Vector3 killPoint)
     {
         if (fullTrail == null || fullTrail.Count < 2)
             return fullTrail ?? new List<Vector3>();
 
-        // No trimming requested — use the entire trail.
         if (killSegmentIndex < 0)
             return fullTrail;
 
-        // Clamp index to valid range.
         int lastIndex = Mathf.Min(killSegmentIndex, fullTrail.Count - 2);
 
-        // Keep all points from the start up to the start of the kill segment (inclusive).
         List<Vector3> trimmed = new List<Vector3>(lastIndex + 2);
         for (int i = 0; i <= lastIndex; i++)
             trimmed.Add(fullTrail[i]);
 
-        // Append the kill point as the terminal point of the trimmed trail.
         trimmed.Add(killPoint);
-
         return trimmed;
     }
 
@@ -294,6 +385,16 @@ public class ZoneInteractionManager : MonoBehaviour
         victim.DestroyZone();
         UnregisterCharacter(victim);
         Destroy(victim.gameObject);
+    }
+
+    private static Vector3 CentroidXZ(List<Vector3> poly)
+    {
+        if (poly == null || poly.Count == 0) return Vector3.zero;
+
+        Vector3 sum = Vector3.zero;
+        for (int i = 0; i < poly.Count; i++) sum += poly[i];
+        sum /= poly.Count;
+        return new Vector3(sum.x, 0f, sum.z);
     }
 
     // -------------------------------------------------------------------------
@@ -314,7 +415,6 @@ public class ZoneInteractionManager : MonoBehaviour
         PathD openPath = Vector3ListToPathD(trailPoints);
         PathsD input = new PathsD { openPath };
 
-        // InflatePaths with EndType.Round creates a capsule-like corridor around the open path.
         double delta = width * 0.5;
         PathsD corridors = Clipper.InflatePaths(input, delta, JoinType.Round, EndType.Round);
 

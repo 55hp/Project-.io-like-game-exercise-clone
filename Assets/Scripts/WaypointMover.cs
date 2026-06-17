@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using HP55.Audio;
 using UnityEngine;
 
 [RequireComponent(typeof(Character))]
@@ -113,9 +114,11 @@ public class WaypointMover : MonoBehaviour
                 // Il centro ha attraversato il confine → trail inizia immediatamente, zero gap visivo.
                 character.AddTrailPoint(transform.position);
                 ZoneInteractionManager.Instance?.CheckTrailKill(character);
+                AudioManager.Instance.SetMusicVolume(1f);
             }
             else if (character.IsDrawingTrail && character.IsInsideZone(transform.position))
             {
+                AudioManager.Instance.SetMusicVolume(0f);
                 // Il centro è rientrato nella zona con trail attiva → chiudi l'area.
                 ZoneInteractionManager.Instance?.CheckZoneConquest(character, character.TrailVertices);
                 character.ReturnToZone();

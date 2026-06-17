@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using HP55.Audio;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -13,6 +15,7 @@ public class Character : MonoBehaviour
 
     [Header("Identity")]
     public string characterName = "Player";
+    [SerializeField] public bool isPlayer = false;
     public Color  zoneColor     = Color.blue;
 
     [Header("Zone Settings")]
@@ -21,6 +24,11 @@ public class Character : MonoBehaviour
 
     // Public data – only this class can reassign the list reference.
     public List<Vector3> areaVertices { get; private set; }
+
+    // Vertices actually rendered by the zone mesh. During a conquest reveal this
+    // temporarily EXCLUDES the just-conquered region (which is shown by a separate
+    // animated mesh); at rest it equals areaVertices.
+    private List<Vector3> renderedAreaVertices;
 
     // State machine.
     public CharacterState State { get; private set; } = CharacterState.InZone;
@@ -48,6 +56,7 @@ public class Character : MonoBehaviour
     private void Awake()
     {
         areaVertices = new List<Vector3>();
+        renderedAreaVertices = new List<Vector3>();
     }
 
     // Start() rimosso: InitializeZone() è ora responsabilità di WaypointMover.Start()
@@ -96,30 +105,23 @@ public class Character : MonoBehaviour
         zoneRenderer = zoneGO.AddComponent<MeshRenderer>();
         zoneCollider = zoneGO.AddComponent<MeshCollider>();
 
-        // --- URP Lit material (transparent) -----------------------------------
-        Shader litShader = Shader.Find("Universal Render Pipeline/Lit");
-        if (litShader == null)
+        // --- RadialReveal material (transparent) --------------------------------
+        Shader revealShader = Shader.Find("Custom/RadialReveal");
+        if (revealShader == null)
         {
-            Debug.LogWarning("[Character] URP Lit shader not found. Is URP installed?");
-            litShader = Shader.Find("Standard");
+            Debug.LogWarning("[Character] Custom/RadialReveal shader not found. Falling back to URP Lit.");
+            revealShader = Shader.Find("Universal Render Pipeline/Lit");
         }
 
-        Material mat = new Material(litShader);
+        Material mat = new Material(revealShader);
 
         Color baseColor = zoneColor;
         baseColor.a = 0.65f;
         mat.SetColor("_BaseColor", baseColor);
+        mat.SetVector("_RevealCenter", new Vector4(0f, 0f, 0f, 0f));
+        mat.SetFloat("_RevealRadius", 60f);
 
-        // Surface type: Transparent
-        mat.SetFloat("_Surface", 1f);
-        mat.SetFloat("_Blend",   0f);   // Alpha blend
-        mat.SetFloat("_ZWrite",  0f);
-        mat.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
-        mat.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
-        mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-        mat.renderQueue = 3000;
-
-        zoneRenderer.sharedMaterial   = mat;
+        zoneRenderer.sharedMaterial    = mat;
         zoneRenderer.shadowCastingMode = ShadowCastingMode.Off;
         zoneRenderer.receiveShadows    = false;
 
@@ -142,18 +144,41 @@ public class Character : MonoBehaviour
         UpdateArea();
     }
 
-    /// <summary>Rebuilds the zone mesh from areaVertices. Returns true if successful.</summary>
+    /// <summary>Rebuilds the zone mesh from the full logical area. Returns true if successful.</summary>
     public bool UpdateArea()
     {
-        if (zoneFilter == null || areaVertices == null || areaVertices.Count < 3) return false;
+        // At rest, the rendered mesh matches the logical area.
+        return UpdateRenderedArea(areaVertices);
+    }
 
-        Mesh mesh = BuildMesh(areaVertices);
+    /// <summary>
+    /// Rebuilds the zone mesh from the supplied render vertices, which may differ from
+    /// areaVertices during a conquest reveal (the conquered region is excluded until the
+    /// reveal animation completes). The collider always matches what is rendered.
+    /// Returns true if the mesh was built successfully.
+    /// </summary>
+    public bool UpdateRenderedArea(List<Vector3> renderVerts)
+    {
+        if (zoneFilter == null || renderVerts == null || renderVerts.Count < 3) return false;
+
+        Mesh mesh = BuildMesh(renderVerts);
         if (mesh == null) return false;
+
+        renderedAreaVertices = renderVerts;
 
         zoneFilter.sharedMesh   = mesh;
         zoneCollider.sharedMesh = null;   // force collider refresh
         zoneCollider.sharedMesh = mesh;
         return true;
+    }
+
+    /// <summary>
+    /// Aligns the rendered mesh to the full logical area. Called at the end of a conquest
+    /// reveal so the conquered region becomes a permanent part of the visible zone.
+    /// </summary>
+    public void CommitRenderedArea()
+    {
+        UpdateRenderedArea(areaVertices);
     }
 
     /// <summary>True while the player has accumulated at least one trail point outside the zone.</summary>
@@ -336,6 +361,12 @@ public class Character : MonoBehaviour
     public void SetAreaVertices(List<Vector3> verts)
     {
         areaVertices = verts;
+    }
+
+    /// <summary>Returns the material currently assigned to the zone MeshRenderer, or null if no zone exists.</summary>
+    public Material GetZoneMaterial()
+    {
+        return zoneRenderer != null ? zoneRenderer.sharedMaterial : null;
     }
 
     /// <summary>Destroys the zone GameObject immediately. Called before the character is killed.</summary>
