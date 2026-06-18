@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using Clipper2Lib;
 using HP55.Audio;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -245,56 +246,6 @@ public class Character : MonoBehaviour
         return Vector2.Distance(p, a + t * ab);
     }
 
-    /// <summary>
-    /// Offsets each point of <paramref name="trail"/> outward (away from the zone centroid)
-    /// by <paramref name="offset"/> units, perpendicular to the local trail tangent on the XZ plane.
-    /// Used to make the captured area include the full visual width of the TrailRenderer.
-    /// </summary>
-    private List<Vector3> OffsetTrailOutward(List<Vector3> trail, float offset)
-    {
-        if (trail.Count < 2) return trail;
-
-        // Zone centroid as "inside" reference.
-        Vector3 centroid = Vector3.zero;
-        foreach (Vector3 v in areaVertices) centroid += v;
-        centroid /= areaVertices.Count;
-
-        List<Vector3> result = new List<Vector3>(trail.Count);
-
-        for (int i = 0; i < trail.Count; i++)
-        {
-            // Non offsettare il primo e l'ultimo punto: devono rimanere ancorati
-            // al confine della zona per DeformArea.FindClosestIndex.
-            if (i == 0 || i == trail.Count - 1)
-            {
-                result.Add(trail[i]);
-                continue;
-            }
-
-            // Tangent: central difference for interior points.
-            Vector3 tangent = trail[i + 1] - trail[i - 1];
-            tangent.y = 0f;
-            if (tangent.sqrMagnitude < 0.0001f)
-            {
-                result.Add(trail[i]);
-                continue;
-            }
-            tangent.Normalize();
-
-            // One of the two XZ perpendiculars.
-            Vector3 perp = new Vector3(-tangent.z, 0f, tangent.x);
-
-            // Flip if it points toward the centroid instead of away from it.
-            Vector3 toCentroid = centroid - trail[i];
-            toCentroid.y = 0f;
-            if (Vector3.Dot(perp, toCentroid) > 0f) perp = -perp;
-
-            result.Add(trail[i] + perp * offset);
-        }
-
-        return result;
-    }
-
     public List<Vector3> GetTrailPoints()
     {
         return new List<Vector3>(newAreaVertices);
@@ -457,28 +408,22 @@ public class Character : MonoBehaviour
     {
         if (newAreaVertices.Count >= minTrailPointsForDeformation)
         {
-            List<Vector3> trailForDeform = newAreaVertices;
-            if (trail != null && trail.startWidth > 0f)
-                trailForDeform = OffsetTrailOutward(newAreaVertices, trail.startWidth * 0.5f);
+            List<Vector3> candidate = UnionAreaWithTrail(areaVertices, newAreaVertices);
 
-            List<Vector3> candidate = AreaManager.DeformArea(areaVertices, trailForDeform);
-
-            if(isPlayer)
-                AudioManager.Instance.PlaySFX("pop");
-            
             // Atomic commit: only accept the new polygon if it triangulates successfully.
-            // This prevents areaVertices from diverging from the visible mesh when the
-            // triangulator rejects a degenerate or self-intersecting candidate.
-            if (!ReferenceEquals(candidate, areaVertices))
+            if (candidate != null && !ReferenceEquals(candidate, areaVertices) && candidate.Count >= 3)
             {
                 List<Vector3> backup = areaVertices;
                 areaVertices = candidate;
 
                 if (!UpdateArea())
                 {
-                    // Triangulation failed — roll back to keep data and mesh in sync.
                     areaVertices = backup;
-                    Debug.LogWarning($"[Character] Zone deformation rejected for '{characterName}': triangulation failed. Keeping previous polygon.", this);
+                    Debug.LogWarning($"[Character] Zone union rejected for '{characterName}': triangulation failed. Keeping previous polygon.", this);
+                }
+                else if (isPlayer)
+                {
+                    AudioManager.Instance.PlaySFX("pop");
                 }
             }
         }
@@ -532,5 +477,70 @@ public class Character : MonoBehaviour
         for (int i = 0; i < verts.Count; i++)
             result[i] = new Vector2(verts[i].x, verts[i].z);
         return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // Clipper2 helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the union of the current area polygon and a thickened trail corridor using Clipper2.
+    /// Unlike the old DeformArea arc approach, this always preserves the full original zone —
+    /// the trail corridor is unioned on top, never replacing half of the boundary.
+    /// Returns the original area reference (unchanged) if the union would shrink the zone or fails.
+    /// </summary>
+    private List<Vector3> UnionAreaWithTrail(List<Vector3> area, List<Vector3> trailPoints)
+    {
+        PathsD subjects = new PathsD();
+
+        if (area != null && area.Count >= 3)
+            subjects.Add(ClipperPath(area));
+
+        if (trailPoints != null && trailPoints.Count >= 2)
+        {
+            float expansion = trail != null && trail.startWidth > 0f
+                ? trail.startWidth * 0.5f
+                : 0.5f;
+
+            PathsD corridors = Clipper.InflatePaths(
+                new PathsD { ClipperPath(trailPoints) },
+                expansion, JoinType.Round, EndType.Round);
+            if (corridors != null) subjects.AddRange(corridors);
+        }
+
+        if (subjects.Count == 0) return area;
+
+        PathsD solution = Clipper.Union(subjects, FillRule.NonZero);
+        if (solution == null || solution.Count == 0) return area;
+
+        // Pick the largest contour (outer boundary, not holes).
+        PathD largest   = solution[0];
+        double maxArea  = Math.Abs(Clipper.Area(largest));
+        for (int i = 1; i < solution.Count; i++)
+        {
+            double a = Math.Abs(Clipper.Area(solution[i]));
+            if (a > maxArea) { maxArea = a; largest = solution[i]; }
+        }
+
+        // Never shrink the zone.
+        if (area != null && area.Count >= 3)
+        {
+            double originalArea = Math.Abs(Clipper.Area(ClipperPath(area)));
+            if (maxArea < originalArea) return area;
+        }
+
+        List<Vector3> result = new List<Vector3>(largest.Count);
+        foreach (PointD pt in largest)
+            result.Add(new Vector3((float)pt.x, zoneHeight, (float)pt.y));
+
+        return result;
+    }
+
+    private static PathD ClipperPath(List<Vector3> verts)
+    {
+        PathD path = new PathD(verts.Count);
+        foreach (Vector3 v in verts)
+            path.Add(new PointD(v.x, v.z));
+        return path;
     }
 }
