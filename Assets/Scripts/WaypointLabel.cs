@@ -14,6 +14,12 @@ public class WaypointLabel : MonoBehaviour
     [SerializeField] private float verticalOffset = 0.4f;
     [SerializeField] private int   fontSize       = 11;
 
+    [Header("Speed Override")]
+    [Tooltip("Se attivo, quando WaypointMover raggiunge questo waypoint aggiorna il proprio speed.")]
+    public bool  setSpeed = false;
+    [Tooltip("Valore di speed applicato a WaypointMover se setSpeed è true.")]
+    public float speed    = 0f;
+
 #if UNITY_EDITOR
     private void OnDrawGizmos()
     {

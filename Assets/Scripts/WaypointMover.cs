@@ -11,7 +11,7 @@ public class WaypointMover : MonoBehaviour
 
     [Header("Path")]
     public List<Transform> waypoints;
-    [Range(0.1f, 20f)] public float speed         = 4f;
+    [Range(0.1f, 500)] public float speed         = 4f;
     [Range(0f,  1f)]   public float curveTension  = 0.5f;
     public bool loop = false;
 
@@ -91,6 +91,9 @@ public class WaypointMover : MonoBehaviour
             progress      = 0f;
             currentIndex += 1;
 
+            // Applica eventuale speed override dal WaypointLabel appena raggiunto
+            TryApplyWaypointLabel(currentIndex);
+
             if (currentIndex >= count - 1)
             {
                 HandleEnd();
@@ -152,6 +155,10 @@ public class WaypointMover : MonoBehaviour
         currentIndex = 0;
         progress     = 0f;
         transform.position = waypoints[0].position;   // evita lo snap al primo frame
+
+        // Applica eventuale speed override sul primo waypoint
+        TryApplyWaypointLabel(0);
+
         isMoving     = true;
     }
 
@@ -194,6 +201,19 @@ public class WaypointMover : MonoBehaviour
                 character.ReturnToZone();
             }
         }
+    }
+
+    /// <summary>
+    /// Se il waypoint all'indice dato ha un WaypointLabel con setSpeed = true,
+    /// aggiorna il campo speed di questo mover.
+    /// </summary>
+    private void TryApplyWaypointLabel(int index)
+    {
+        if (waypoints == null || index < 0 || index >= waypoints.Count) return;
+
+        var label = waypoints[index].GetComponent<WaypointLabel>();
+        if (label != null && label.setSpeed)
+            speed = label.speed;
     }
 
     /// <summary>

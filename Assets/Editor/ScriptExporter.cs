@@ -31,23 +31,36 @@ namespace hp55games.Editor.Tools
                 return;
             }
 
+            // Filter out scripts inside any "Plugins" folder
+            var filteredGuids = System.Array.FindAll(scriptGuids, guid =>
+            {
+                string p = AssetDatabase.GUIDToAssetPath(guid);
+                return !p.Replace('\\', '/').Contains("/Plugins/");
+            });
+
+            if (filteredGuids.Length == 0)
+            {
+                EditorUtility.DisplayDialog("Script Exporter", "Nessun script trovato al di fuori della cartella Plugins.", "OK");
+                return;
+            }
+
             var sb = new StringBuilder();
 
             sb.AppendLine($"// Generated: {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine($"// Total scripts: {scriptGuids.Length}");
+            sb.AppendLine($"// Total scripts: {filteredGuids.Length} (Plugins esclusi)");
             sb.AppendLine();
             sb.AppendLine();
             sb.AppendLine();
 
-            for (int i = 0; i < scriptGuids.Length; i++)
+            for (int i = 0; i < filteredGuids.Length; i++)
             {
-                string assetPath = AssetDatabase.GUIDToAssetPath(scriptGuids[i]);
+                string assetPath = AssetDatabase.GUIDToAssetPath(filteredGuids[i]);
                 string fullPath  = Path.GetFullPath(assetPath);
 
                 EditorUtility.DisplayProgressBar(
                     "Script Exporter",
                     $"Processando {assetPath}",
-                    (float)i / scriptGuids.Length);
+                    (float)i / filteredGuids.Length);
 
                 if (!File.Exists(fullPath))
                     continue;
@@ -60,7 +73,7 @@ namespace hp55games.Editor.Tools
                 sb.AppendLine(content);
 
                 // 3 blank lines separator (skip after last file)
-                if (i < scriptGuids.Length - 1)
+                if (i < filteredGuids.Length - 1)
                 {
                     sb.AppendLine();
                     sb.AppendLine();
@@ -72,11 +85,11 @@ namespace hp55games.Editor.Tools
 
             File.WriteAllText(outputPath, sb.ToString(), Encoding.UTF8);
 
-            Debug.Log($"[ScriptExporter] {scriptGuids.Length} script esportati in: {outputPath}");
+            Debug.Log($"[ScriptExporter] {filteredGuids.Length} script esportati in: {outputPath}");
 
             EditorUtility.DisplayDialog(
                 "Script Exporter",
-                $"{scriptGuids.Length} script esportati in:\n{outputPath}",
+                $"{filteredGuids.Length} script esportati in:\n{outputPath}",
                 "OK");
         }
     }

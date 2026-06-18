@@ -7,7 +7,7 @@ Shader "Custom/RadialReveal"
         _RevealCenter ("Reveal Center (World)", Vector) = (0, 0, 0, 0)
         _RevealRadius ("Reveal Radius", Float) = 0
         _RevealSoftness ("Reveal Softness", Float) = 0.5
-        _EdgeColor ("Edge Glow Color", Color) = (1, 1, 1, 1)
+        [HDR] _EdgeColor ("Edge Glow Color", Color) = (1, 1, 1, 1)
         _EdgeWidth ("Edge Width", Float) = 0.3
     }
 
@@ -83,18 +83,23 @@ Shader "Custom/RadialReveal"
                 // Clip fully outside pixels.
                 clip(revealAlpha - 0.001);
 
-                // Base color.
+                // Base color. The texture contributes RGB only — its alpha must NOT drive the
+                // zone's opacity (otherwise a texture with low/zero alpha makes the area vanish).
                 half4 texColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv);
-                half4 baseOutput = texColor * _BaseColor;
+                half3 baseRGB  = texColor.rgb * _BaseColor.rgb;
 
-                // Edge glow: blend toward _EdgeColor near the boundary.
-                float edgeStart = _RevealRadius - _EdgeWidth;
-                float edgeFactor = smoothstep(edgeStart - softness * 0.5, _RevealRadius - softness * 0.25, dist);
-                edgeFactor = saturate(edgeFactor);
+                // Leading-edge glow: a band of width _EdgeWidth just INSIDE the current reveal
+                // radius. Because it is measured relative to _RevealRadius, it tracks the sweeping
+                // front during the conquest animation regardless of how large the radius is.
+                float edgeInner = _RevealRadius - max(_EdgeWidth, 0.0001);
+                float edgeFactor = smoothstep(edgeInner, _RevealRadius, dist);
+                edgeFactor = saturate(edgeFactor) * revealAlpha;
 
-                // Mix edge glow with base (HDR-friendly — EdgeColor can exceed 1 for bloom).
-                half3 finalColor = lerp(baseOutput.rgb, _EdgeColor.rgb * _EdgeColor.a, edgeFactor);
-                half finalAlpha = baseOutput.a * revealAlpha;
+                // Edge color is HDR (can exceed 1) so Bloom picks up the moving front.
+                half3 finalColor = lerp(baseRGB, _EdgeColor.rgb, edgeFactor);
+
+                // Opacity depends only on the zone's own alpha and the reveal mask — never on the texture alpha.
+                half finalAlpha = _BaseColor.a * revealAlpha;
 
                 return half4(finalColor, finalAlpha);
             }

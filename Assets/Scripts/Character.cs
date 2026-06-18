@@ -1,3 +1,5 @@
+// ===== Assets/Scripts/Character.cs =====
+
 using System;
 using System.Collections.Generic;
 using HP55.Audio;
@@ -19,8 +21,17 @@ public class Character : MonoBehaviour
     public Color  zoneColor     = Color.blue;
 
     [Header("Zone Settings")]
+    [Tooltip("The material for this character's area. Must use the Custom/RadialReveal shader. " +
+             "All aesthetics (texture, colour, animation, edge glow) are configured on this asset; " +
+             "code only drives _RevealRadius / _RevealCenter for the conquest reveal.")]
+    [SerializeField] private Material zoneMaterial;
     [SerializeField] private float startAreaRadius = 3f;
     [SerializeField] private int   startAreaPoints = 36;
+    [Tooltip("World units per texture tile on the zone. Larger = bigger pattern. " +
+             "E.g. 4 means the texture repeats every 4 world units across the area.")]
+    [SerializeField] private float uvWorldScale = 4f;
+    [Tooltip("Y height at which the zone mesh is generated. Raise above 0 to lift the area above the ground plane.")]
+    [SerializeField] private float zoneHeight = 0.05f;
 
     // Public data – only this class can reassign the list reference.
     public List<Vector3> areaVertices { get; private set; }
@@ -105,21 +116,25 @@ public class Character : MonoBehaviour
         zoneRenderer = zoneGO.AddComponent<MeshRenderer>();
         zoneCollider = zoneGO.AddComponent<MeshCollider>();
 
-        // --- RadialReveal material (transparent) --------------------------------
-        Shader revealShader = Shader.Find("Custom/RadialReveal");
-        if (revealShader == null)
+        // --- Zone material: use the externally assigned asset (Custom/RadialReveal) ---
+        // The aesthetic is owned by the asset; we only instantiate it so each character has
+        // its own material instance to drive _RevealRadius / _RevealCenter independently.
+        Material mat;
+        if (zoneMaterial != null)
         {
-            Debug.LogWarning("[Character] Custom/RadialReveal shader not found. Falling back to URP Lit.");
-            revealShader = Shader.Find("Universal Render Pipeline/Lit");
+            mat = new Material(zoneMaterial);
+        }
+        else
+        {
+            Debug.LogWarning("[Character] No zoneMaterial assigned. Falling back to a plain Custom/RadialReveal instance.", this);
+            Shader revealShader = Shader.Find("Custom/RadialReveal");
+            if (revealShader == null) revealShader = Shader.Find("Universal Render Pipeline/Lit");
+            mat = new Material(revealShader);
         }
 
-        Material mat = new Material(revealShader);
-
-        Color baseColor = zoneColor;
-        baseColor.a = 0.65f;
-        mat.SetColor("_BaseColor", baseColor);
-        mat.SetVector("_RevealCenter", new Vector4(0f, 0f, 0f, 0f));
-        mat.SetFloat("_RevealRadius", 60f);
+        // Code only controls the reveal mechanic — never colour/texture/aesthetics.
+        if (mat.HasProperty("_RevealCenter")) mat.SetVector("_RevealCenter", new Vector4(0f, 0f, 0f, 0f));
+        if (mat.HasProperty("_RevealRadius")) mat.SetFloat("_RevealRadius", 60f);
 
         zoneRenderer.sharedMaterial    = mat;
         zoneRenderer.shadowCastingMode = ShadowCastingMode.Off;
@@ -136,7 +151,7 @@ public class Character : MonoBehaviour
             float angle = (float)i / startAreaPoints * Mathf.PI * 2f;
             areaVertices.Add(new Vector3(
                 center.x + Mathf.Cos(angle) * startAreaRadius,
-                center.y,
+                zoneHeight,
                 center.z + Mathf.Sin(angle) * startAreaRadius
             ));
         }
@@ -424,7 +439,10 @@ public class Character : MonoBehaviour
         float boundaryTolerance = trail != null ? trail.startWidth * 0.5f + 0.1f : 0.3f;
         if (insideZone && minDistToBoundary > boundaryTolerance) return;
 
-        newAreaVertices.Add(worldPos);
+        // Lock Y to zoneHeight so trail points are coplanar with the zone mesh.
+        // This ensures DeformArea works correctly (all vertices on the same plane).
+        Vector3 flatPos = new Vector3(worldPos.x, zoneHeight, worldPos.z);
+        newAreaVertices.Add(flatPos);
 
         State = CharacterState.Trailing;
 
@@ -445,6 +463,9 @@ public class Character : MonoBehaviour
 
             List<Vector3> candidate = AreaManager.DeformArea(areaVertices, trailForDeform);
 
+            if(isPlayer)
+                AudioManager.Instance.PlaySFX("pop");
+            
             // Atomic commit: only accept the new polygon if it triangulates successfully.
             // This prevents areaVertices from diverging from the visible mesh when the
             // triangulator rejects a degenerate or self-intersecting candidate.
@@ -491,6 +512,15 @@ public class Character : MonoBehaviour
         Mesh mesh = new Mesh { name = characterName + "ZoneMesh" };
         mesh.vertices  = verts.ToArray();
         mesh.triangles = tris;
+
+        // Planar UVs from world X/Z so the material texture actually maps across the area.
+        // Without this every vertex samples UV (0,0) and the texture looks like a flat colour.
+        // uvWorldScale converts world units to texture tiles (1 tile per uvWorldScale units).
+        Vector2[] uvs = new Vector2[verts.Count];
+        for (int i = 0; i < verts.Count; i++)
+            uvs[i] = new Vector2(verts[i].x / uvWorldScale, verts[i].z / uvWorldScale);
+        mesh.uv = uvs;
+
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
         return mesh;

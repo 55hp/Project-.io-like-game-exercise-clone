@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Clipper2Lib;
+using HP55.Audio;
 using UnityEngine;
 
 public class ZoneInteractionManager : MonoBehaviour
@@ -122,6 +123,7 @@ public class ZoneInteractionManager : MonoBehaviour
                     Vector3 killPoint = new Vector3(killPoint2D.x, 0f, killPoint2D.y);
 
                     enemy.SetState(CharacterState.Dead);
+                    AudioManager.Instance.PlaySFX("kill");
                     AbsorbAreaAndKill(mover, enemy, i, killPoint);
                     return;
                 }
@@ -191,6 +193,7 @@ public class ZoneInteractionManager : MonoBehaviour
                 // since there is no single collision point. killSegmentIndex = -1 means
                 // "use the full victim trail" inside AbsorbAreaAndKill.
                 enemy.SetState(CharacterState.Dead);
+                AudioManager.Instance.PlaySFX("kill");
                 Vector3 enclosureCentre = CentroidXZ(enemy.GetAreaPolygon());
                 AbsorbAreaAndKill(attacker, enemy, -1, enclosureCentre);
                 continue;

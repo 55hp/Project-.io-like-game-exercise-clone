@@ -10,7 +10,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 05acc715f855ced458d76ee6f8ac6c61, type: 3}
-  m_Name: Cinemachine Track (1)
+  m_Name: nemachine Track (1)1)
   m_EditorClassIdentifier: 
   m_Version: 3
   m_AnimClip: {fileID: 0}
@@ -39,7 +39,7 @@ MonoBehaviour:
   m_Tracks:
   - {fileID: -7313613176818295612}
   - {fileID: 3212385182040238897}
-  m_FixedDuration: 30
+  m_FixedDuration: 30.083333333333332
   m_EditorSettings:
     m_Framerate: 60
     m_ScenePreview: 1

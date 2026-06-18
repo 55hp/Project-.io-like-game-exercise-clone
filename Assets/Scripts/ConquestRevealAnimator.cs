@@ -55,7 +55,9 @@ public class ConquestRevealAnimator : MonoBehaviour
         Material matInstance = new Material(skinMaterial);
         meshRenderer.sharedMaterial = matInstance;
 
-        // 4. Set initial reveal properties.
+        // 4. Set reveal mechanic properties only. All aesthetics (colour, texture, edge
+        //    glow, animation) are baked into the assigned zone material asset — code never
+        //    touches them. We only drive the radial reveal here.
         Vector4 center = new Vector4(collisionPoint.x, 0f, collisionPoint.z, 0f);
         matInstance.SetVector("_RevealCenter", center);
         matInstance.SetFloat("_RevealRadius", 0f);
@@ -103,6 +105,10 @@ public class ConquestRevealAnimator : MonoBehaviour
     // Private helpers
     // -------------------------------------------------------------------------
 
+    // Must match Character.uvWorldScale so the conquered region's texture lines up
+    // seamlessly with the rest of the zone during the reveal.
+    private const float UV_WORLD_SCALE = 4f;
+
     private static Mesh BuildMesh(List<Vector3> verts)
     {
         Vector2[] verts2D = new Vector2[verts.Count];
@@ -115,6 +121,13 @@ public class ConquestRevealAnimator : MonoBehaviour
         Mesh mesh = new Mesh { name = "ConquestRevealMesh" };
         mesh.vertices = verts.ToArray();
         mesh.triangles = tris;
+
+        // Same planar world-space UV mapping as Character.BuildMesh so the texture is continuous.
+        Vector2[] uvs = new Vector2[verts.Count];
+        for (int i = 0; i < verts.Count; i++)
+            uvs[i] = new Vector2(verts[i].x / UV_WORLD_SCALE, verts[i].z / UV_WORLD_SCALE);
+        mesh.uv = uvs;
+
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
         return mesh;

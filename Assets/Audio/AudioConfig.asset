@@ -12,7 +12,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b52c6e5a61daf1149a7749f174b49f5e, type: 3}
   m_Name: AudioConfig
   m_EditorClassIdentifier: 
-  SFXEntries: []
+  SFXEntries:
+  - Id: kill
+    Clip: {fileID: 8300000, guid: 2815a19ae465da24d94de4fc1b016a75, type: 3}
+    Volume: 1
+    Loop: 0
+  - Id: pop
+    Clip: {fileID: 8300000, guid: 38eaef6813787db43bc7d2145b3f47d5, type: 3}
+    Volume: 1
+    Loop: 0
+  - Id: hundred
+    Clip: {fileID: 8300000, guid: 1e3c71c54e622c04ca5bb2e9929f699e, type: 3}
+    Volume: 1
+    Loop: 0
   MusicEntries:
   - Id: walk
     Clip: {fileID: 8300000, guid: 7412b405505501e49bd9e1ab0a18150e, type: 3}
